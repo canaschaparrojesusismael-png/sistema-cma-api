@@ -1,0 +1,9 @@
+{
+  "name": "sistema-cma-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Backend serverless (Vercel) para Sistema CMA — reemplaza las Cloud Functions de Firebase que requerían el plan Blaze.",
+  "dependencies": {
+    "firebase-admin": "^12.1.0"
+  }
+}
