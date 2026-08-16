@@ -1,4 +1,4 @@
-const admin = require("../_lib/firebaseAdmin");
+const getAdmin = require("../_lib/firebaseAdmin");
 const { handleCorsAndMethod, sendError } = require("../_lib/helpers");
 
 const SYSTEM_PROMPT_BASE = `Sos el asistente virtual del Sistema Nacional de Orquestas y Coros
@@ -21,7 +21,7 @@ REGLAS ESTRICTAS:
 
 // ---------- RAG liviano: trae el material de Formación y arma contexto ----------
 async function construirContexto(pregunta) {
-  const db = admin.firestore();
+  const db = getAdmin().firestore();
   const snap = await db.collection("formacion_modulos").limit(300).get();
   const recursos = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
   if (!recursos.length) return "(Todavía no hay recursos cargados en Formación.)";
@@ -123,7 +123,13 @@ module.exports = async (req, res) => {
       return res.status(400).json({ error: "El mensaje es demasiado largo (máx. 1000 caracteres)." });
     }
 
-    const contexto = await construirContexto(mensaje);
+    let contexto;
+    try {
+      contexto = await construirContexto(mensaje);
+    } catch (errContexto) {
+      console.error("No se pudo construir el contexto desde Formación (sigo sin él):", errContexto.message);
+      contexto = "(No se pudo leer el material de Formación en este momento — revisá FIREBASE_SERVICE_ACCOUNT_KEY en Vercel si esto persiste.)";
+    }
     const systemPrompt = `${SYSTEM_PROMPT_BASE}\n\nMATERIAL OFICIAL DE FORMACIÓN (usalo cuando aplique):\n${contexto}`;
 
     let respuesta, proveedor;

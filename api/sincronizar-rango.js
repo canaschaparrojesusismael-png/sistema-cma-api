@@ -1,4 +1,4 @@
-const admin = require("../_lib/firebaseAdmin");
+const getAdmin = require("../_lib/firebaseAdmin");
 const { handleCorsAndMethod, getCallerUidOrThrow, sendError } = require("../_lib/helpers");
 
 // OPCIONAL: el trigger original (sincronizarRangoEnAuth) se disparaba solo
@@ -16,18 +16,18 @@ module.exports = async (req, res) => {
     const { targetUid } = req.body || {};
     if (!targetUid) return res.status(400).json({ error: "Se requiere targetUid." });
 
-    const callerDoc = await admin.firestore().collection("usuarios").doc(callerUid).get();
+    const callerDoc = await getAdmin().firestore().collection("usuarios").doc(callerUid).get();
     if (!callerDoc.exists || !["owner_supremo", "director_nacional"].includes(callerDoc.data().rango)) {
       return res.status(403).json({ error: "No tenés permiso para sincronizar rangos." });
     }
 
-    const targetDoc = await admin.firestore().collection("usuarios").doc(targetUid).get();
+    const targetDoc = await getAdmin().firestore().collection("usuarios").doc(targetUid).get();
     if (!targetDoc.exists) {
-      await admin.auth().setCustomUserClaims(targetUid, null);
+      await getAdmin().auth().setCustomUserClaims(targetUid, null);
       return res.status(200).json({ success: true, cleared: true });
     }
 
-    await admin.auth().setCustomUserClaims(targetUid, { rango: targetDoc.data().rango });
+    await getAdmin().auth().setCustomUserClaims(targetUid, { rango: targetDoc.data().rango });
     res.status(200).json({ success: true });
   } catch (err) {
     sendError(res, err);

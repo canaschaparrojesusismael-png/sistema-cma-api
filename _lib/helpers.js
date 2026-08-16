@@ -1,4 +1,4 @@
-const admin = require("./firebaseAdmin");
+const getAdmin = require("./firebaseAdmin");
 
 // Cambiá esto por tu dominio real de GitHub Pages para más seguridad
 // (por ejemplo "https://tu-usuario.github.io"). "*" funciona pero es más laxo.
@@ -37,11 +37,11 @@ async function getCallerUidOrThrow(req) {
     throw err;
   }
   try {
-    const decoded = await admin.auth().verifyIdToken(token);
+    const decoded = await getAdmin().auth().verifyIdToken(token);
     return decoded.uid;
   } catch (e) {
-    const err = new Error("Sesión inválida o expirada.");
-    err.status = 401;
+    const err = new Error(e.message?.includes("FIREBASE_SERVICE_ACCOUNT_KEY") ? e.message : "Sesión inválida o expirada.");
+    err.status = e.message?.includes("FIREBASE_SERVICE_ACCOUNT_KEY") ? 500 : 401;
     throw err;
   }
 }

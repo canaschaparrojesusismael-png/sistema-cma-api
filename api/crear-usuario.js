@@ -1,4 +1,4 @@
-const admin = require("../_lib/firebaseAdmin");
+const getAdmin = require("../_lib/firebaseAdmin");
 const { handleCorsAndMethod, getCallerUidOrThrow, sendError } = require("../_lib/helpers");
 
 const JERARQUIA = {
@@ -22,7 +22,7 @@ module.exports = async (req, res) => {
       return res.status(400).json({ error: "Faltan campos obligatorios." });
     }
 
-    const callerDoc = await admin.firestore().collection("usuarios").doc(callerUid).get();
+    const callerDoc = await getAdmin().firestore().collection("usuarios").doc(callerUid).get();
     if (!callerDoc.exists) return res.status(404).json({ error: "Solicitante no encontrado." });
     const callerRango = callerDoc.data().rango;
     const callerEstado = callerDoc.data().estado;
@@ -43,12 +43,12 @@ module.exports = async (req, res) => {
 
     let userRecord;
     try {
-      userRecord = await admin.auth().createUser({ email, password, displayName: nombre });
+      userRecord = await getAdmin().auth().createUser({ email, password, displayName: nombre });
     } catch (error) {
       return res.status(500).json({ error: "Error al crear usuario en Auth: " + error.message });
     }
 
-    await admin.firestore().collection("usuarios").doc(userRecord.uid).set({
+    await getAdmin().firestore().collection("usuarios").doc(userRecord.uid).set({
       username: email,
       nombre,
       rango,
