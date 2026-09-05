@@ -16,6 +16,7 @@ const VENTANA_CACHE_MS = 30 * 1000;
 // (fue justo lo que pasó: la clave era válida, pero el modelo ya no existía).
 // Ahora el diagnóstico SIEMPRE va a mostrar el error real si lo hay.
 module.exports = async (req, res) => {
+  const inicio = Date.now();
   const setCorsHeaders = () => {
     res.setHeader("Access-Control-Allow-Origin", process.env.ALLOWED_ORIGIN || "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -101,8 +102,14 @@ module.exports = async (req, res) => {
     reporte.gemini = `${cache.gemini} (resultado guardado hace ${segundos}s)`;
     reporte.ok = reporte.ok && cache.ok;
   } else {
+    // CORREGIDO 2026-09-05: mismo bug de tiempos que en chat.js — Vercel
+    // mata esta función a los 10s (vercel.json → maxDuration), y sin un
+    // presupuesto compartido, Groq y Gemini podían sumar hasta 24s entre
+    // los dos (3 modelos × 4s cada uno, por proveedor) si todos fallaban
+    // por timeout. Le damos a cada proveedor una porción fija del total,
+    // dejando margen para la respuesta final.
     try {
-      const respuesta = await preguntarGroq("Respondé solo con la palabra: ok", [], "hola");
+      const respuesta = await preguntarGroq("Respondé solo con la palabra: ok", [], "hola", inicio + 4200);
       reporte.groq = respuesta ? `✅ responde correctamente (dijo: "${respuesta.slice(0, 60)}")` : "❌ respondió 200 pero sin texto";
       if (!respuesta) reporte.ok = false;
     } catch (err) {
@@ -111,7 +118,7 @@ module.exports = async (req, res) => {
     }
 
     try {
-      const respuesta = await preguntarGemini("Respondé solo con la palabra: ok", [], "hola");
+      const respuesta = await preguntarGemini("Respondé solo con la palabra: ok", [], "hola", inicio + 8600);
       reporte.gemini = respuesta ? `✅ responde correctamente (dijo: "${respuesta.slice(0, 60)}")` : "❌ respondió 200 pero sin texto";
       if (!respuesta) reporte.ok = false;
     } catch (err) {

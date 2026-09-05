@@ -127,16 +127,35 @@ module.exports = async (req, res) => {
     }
     const systemPrompt = `${SYSTEM_PROMPT_BASE}\n\nMATERIAL OFICIAL DE FORMACIÓN (usalo cuando aplique):\n${contexto}`;
 
+    // ------------------------------------------------------------------
+    // CORREGIDO 2026-09-05: BUG REAL DE TIEMPOS. vercel.json fija
+    // maxDuration: 10 (Vercel mata la función a los 10s, pase lo que pase).
+    // Antes cada modelo de Groq/Gemini tenía su PROPIO timeout de 4000ms
+    // sin relación entre ellos — en el peor caso (los 3 modelos de Groq
+    // fallando por timeout/404, y después los 3 de Gemini fallando igual)
+    // esto podía sumar hasta 24 SEGUNDOS, más del doble del límite real de
+    // Vercel. Cuando eso pasa, la plataforma corta la función A LA FUERZA
+    // antes de que el código llegue a devolver su propio JSON de error —
+    // el navegador ve un 502/504 de Vercel mismo, sin ningún mensaje útil.
+    // DEADLINE_IA es un presupuesto de tiempo COMPARTIDO entre Groq y
+    // Gemini, contado desde el inicio mismo del pedido (no desde acá) —
+    // así ya descuenta el tiempo que ya se gastó en verificar sesión,
+    // límite de uso y construir el contexto de Formación. Deja ~1.8s de
+    // margen dentro del límite de 10s para el resto del código y el envío
+    // de la respuesta final.
+    // ------------------------------------------------------------------
+    const DEADLINE_IA = inicio + 8200;
+
     let respuesta, proveedor;
     let motivoGroq = null, motivoGemini = null;
     try {
-      respuesta = await preguntarGroq(systemPrompt, historial, mensaje);
+      respuesta = await preguntarGroq(systemPrompt, historial, mensaje, DEADLINE_IA);
       proveedor = "groq";
     } catch (errGroq) {
       motivoGroq = errGroq.message;
       console.error("Groq falló, probando Gemini:", errGroq.message);
       try {
-        respuesta = await preguntarGemini(systemPrompt, historial, mensaje);
+        respuesta = await preguntarGemini(systemPrompt, historial, mensaje, DEADLINE_IA);
         proveedor = "gemini";
       } catch (errGemini) {
         motivoGemini = errGemini.message;

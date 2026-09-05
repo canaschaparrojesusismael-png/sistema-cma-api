@@ -10,7 +10,7 @@
 // si la versión que ves en el chat/los logs NO es esta, el deploy todavía
 // no se aplicó (hay que revisar GitHub → Vercel, no el código en sí).
 // ================================================================
-const VERSION_IA = "2026-09-01.5-modelos-vigentes";
+const VERSION_IA = "2026-09-05.6-presupuesto-de-tiempo-compartido";
 
 // El frontend arma el historial con nombres de campo en español
 // ({ rol: "usuario"|"ia", texto: "..." }), pero las APIs de Groq/Gemini
@@ -92,7 +92,22 @@ function categorizarStatusHttp(status, proveedor, modelo) {
 }
 
 // ---------- Groq (rápido, gratis, modelos abiertos tipo OpenAI) ----------
-async function preguntarGroq(systemPrompt, historial, mensaje) {
+// CORREGIDO 2026-09-05: BUG REAL DE TIEMPOS. Vercel mata la función a los
+// 10s (vercel.json → maxDuration: 10). Antes cada modelo de la lista tenía
+// SU PROPIO timeout de 4000ms, sin relación entre ellos — en el peor caso
+// (3 modelos de Groq fallando por timeout/404, después 3 de Gemini
+// fallando igual) esto suma hasta 3×4s + 3×4s = 24 SEGUNDOS, más del
+// doble del límite real. Cuando eso pasa, Vercel corta la función A LA
+// FUERZA antes de que el código llegue a su propio "ambos proveedores
+// fallaron" — el navegador ve un 502/504 de la PLATAFORMA, no de este
+// código, y ninguno de los mensajes de error de acá llega a aparecer.
+// Arreglo: ahora se recibe un "deadline" (marca de tiempo absoluta) desde
+// quien llama — api/chat.js reparte un presupuesto total entre Groq y
+// Gemini desde el inicio mismo del pedido. Cada intento usa el tiempo que
+// quede, nunca más de 4s, y si ya no queda tiempo útil (menos de 800ms) se
+// deja de intentar más modelos en vez de arriesgarse a que Vercel corte
+// todo de golpe sin ninguna respuesta.
+async function preguntarGroq(systemPrompt, historial, mensaje, deadline) {
   const key = process.env.GROQ_API_KEY;
   if (!key) throw new Error("GROQ_API_KEY no configurada");
 
@@ -107,6 +122,12 @@ async function preguntarGroq(systemPrompt, historial, mensaje) {
   const erroresPorModelo = [];
 
   for (const modelo of MODELOS_GROQ) {
+    const msRestantes = deadline ? deadline - Date.now() : 4000;
+    if (msRestantes < 800) {
+      erroresPorModelo.push(`${modelo}: sin tiempo suficiente en el presupuesto total (quedaban ${Math.max(0, Math.round(msRestantes))}ms) — no se intentó, para no arriesgarse a que Vercel corte la función entera`);
+      break;
+    }
+    const timeoutEsteIntento = Math.min(4000, msRestantes);
     let resp;
     try {
       resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -124,11 +145,11 @@ async function preguntarGroq(systemPrompt, historial, mensaje) {
           max_completion_tokens: 2048,
           reasoning_effort: "low",
         }),
-        signal: AbortSignal.timeout(4000),
+        signal: AbortSignal.timeout(timeoutEsteIntento),
       });
     } catch (errRed) {
       const motivo = errRed.name === "TimeoutError" || errRed.name === "AbortError"
-        ? "timeout de 4s"
+        ? `timeout de ${timeoutEsteIntento}ms`
         : `no se pudo conectar (${errRed.message})`;
       erroresPorModelo.push(`${modelo}: ${motivo}`);
       continue; // probamos el siguiente modelo de la lista
@@ -162,7 +183,7 @@ async function preguntarGroq(systemPrompt, historial, mensaje) {
 }
 
 // ---------- Google Gemini (respaldo si Groq falla) ----------
-async function preguntarGemini(systemPrompt, historial, mensaje) {
+async function preguntarGemini(systemPrompt, historial, mensaje, deadline) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error("GEMINI_API_KEY no configurada");
 
@@ -180,6 +201,12 @@ async function preguntarGemini(systemPrompt, historial, mensaje) {
   const erroresPorModelo = [];
 
   for (const modelo of MODELOS_GEMINI) {
+    const msRestantes = deadline ? deadline - Date.now() : 4000;
+    if (msRestantes < 800) {
+      erroresPorModelo.push(`${modelo}: sin tiempo suficiente en el presupuesto total (quedaban ${Math.max(0, Math.round(msRestantes))}ms) — no se intentó`);
+      break;
+    }
+    const timeoutEsteIntento = Math.min(4000, msRestantes);
     let resp;
     try {
       resp = await fetch(
@@ -196,12 +223,12 @@ async function preguntarGemini(systemPrompt, historial, mensaje) {
               thinkingConfig: { thinkingLevel: "low" },
             },
           }),
-          signal: AbortSignal.timeout(4000),
+          signal: AbortSignal.timeout(timeoutEsteIntento),
         }
       );
     } catch (errRed) {
       const motivo = errRed.name === "TimeoutError" || errRed.name === "AbortError"
-        ? "timeout de 4s"
+        ? `timeout de ${timeoutEsteIntento}ms`
         : `no se pudo conectar (${errRed.message})`;
       erroresPorModelo.push(`${modelo}: ${motivo}`);
       continue;
