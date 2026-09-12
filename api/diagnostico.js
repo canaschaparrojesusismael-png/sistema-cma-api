@@ -23,6 +23,11 @@ module.exports = async (req, res) => {
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   };
   setCorsHeaders();
+  // v3.0 (P-59): cabecera HTTP explícita además de la caché propia en
+  // Firestore de más abajo — sin esto, un proxy/CDN intermedio podría
+  // guardar una respuesta vieja por su cuenta y servirla de más, sin que
+  // el propio endpoint tenga forma de saberlo o corregirlo.
+  res.setHeader("Cache-Control", "no-store");
   if (req.method === "OPTIONS") return res.status(204).end();
 
   const reporte = {

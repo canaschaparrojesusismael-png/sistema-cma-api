@@ -14,11 +14,21 @@ REGLAS ESTRICTAS:
    musicales, y no respondas la pregunta.
 3. Cuando la respuesta esté en el material de Formación de abajo, decilo
    explícitamente: "Esto lo encontrás en Formación → [Nivel] → [nombre del recurso]".
+   Si en cambio la respuesta viene de la sección PIEZAS DEL REPERTORIO de abajo,
+   decilo así: "Esto lo encontrás en Piezas → [Agrupación] → [Pieza]". Si viene de
+   la sección PRÓXIMOS EVENTOS, decilo así: "Esto lo encontrás en el Panel → Calendario".
 4. Si no está en el material del sitio pero es una pregunta legítima de música
    general, respondé igual con tu conocimiento, dejando claro que es
    información general (no del material oficial del sitio).
 5. Sé breve, claro y pedagógico — le hablás a estudiantes de orquesta, muchos
-   niños y jóvenes. Nada de lenguaje ofensivo ni fuera de tema.`;
+   niños y jóvenes. Nada de lenguaje ofensivo ni fuera de tema.
+6. Para datos biográficos, históricos o factuales específicos (nombres, fechas,
+   cargos, títulos de obras) que NO estén en el material del sitio: contestá
+   solo con lo que sepas con ALTA confianza. Si no estás seguro de un detalle
+   puntual, decilo de forma explícita ("no tengo certeza sobre este dato
+   específico") en vez de inventar algo que suene seguro. Nunca presentes un
+   dato que no verificaste como si fuera un hecho confirmado — es preferible
+   una respuesta más corta y honesta que una incorrecta pero segura de sí misma.`;
 
 // ---------- RAG liviano: trae el material de Formación y arma contexto ----------
 async function construirContexto(pregunta) {
@@ -59,6 +69,82 @@ async function construirContexto(pregunta) {
       return `· "${r.nombre}" (Nivel: ${r.nivel || "—"} / Tipo: ${r.tipo || "—"})\n  ${cuerpo}`;
     })
     .join("\n\n");
+}
+
+// ---------- v3.0 (G-24/G-25): RAG liviano ADICIONAL — Piezas y Eventos ----------
+// Función NUEVA e independiente: construirContexto() de arriba (Formación)
+// no se tocó ni una línea. Esta función tiene su propio try/catch interno
+// por consulta y se llama con Promise.allSettled desde el handler, así que
+// si algo acá falla (o tarda), el contexto de Formación que YA funcionaba
+// sigue andando exactamente igual — nunca puede tumbar ni demorar
+// significativamente el resto del chat.
+async function construirContextoAdicional(pregunta) {
+  const db = getAdmin().firestore();
+  const palabrasPregunta = (pregunta || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .split(/\W+/)
+    .filter((w) => w.length > 3);
+  if (!palabrasPregunta.length) return "";
+
+  const normalizar = (s) => (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const hoyStr = new Date().toISOString().slice(0, 10);
+
+  // Mismo patrón de timeout propio de 2.5s que ya usa construirContexto()
+  // para Formación, para no arriesgar el presupuesto de 10s de Vercel.
+  const [piezasSnap, eventosSnap] = await Promise.all([
+    Promise.race([
+      db.collection("piezas").limit(300).get(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Firestore (piezas) tardó más de 2.5s")), 2500)),
+    ]).catch((e) => { console.error("Contexto adicional — piezas no disponible:", e.message); return null; }),
+    Promise.race([
+      db.collection("eventos").where("date", ">=", hoyStr).limit(150).get(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Firestore (eventos) tardó más de 2.5s")), 2500)),
+    ]).catch((e) => { console.error("Contexto adicional — eventos no disponible:", e.message); return null; }),
+  ]);
+
+  const partes = [];
+
+  if (piezasSnap) {
+    const relevantes = piezasSnap.docs
+      .map((d) => ({ id: d.id, ...d.data() }))
+      .map((p) => {
+        const texto = normalizar(`${p.titulo || ""} ${p.agrupacionId || ""}`);
+        return { ...p, _score: palabrasPregunta.reduce((acc, w) => acc + (texto.includes(w) ? 1 : 0), 0) };
+      })
+      .filter((p) => p._score > 0)
+      .sort((a, b) => b._score - a._score)
+      .slice(0, 3);
+    if (relevantes.length) {
+      partes.push(
+        "PIEZAS DEL REPERTORIO (ubicación: Piezas → [Agrupación] → [Pieza]):\n" +
+        relevantes.map((p) =>
+          `· "${p.titulo}" — Agrupación: ${p.agrupacionId || "—"}` +
+          ((p.instrumentos && p.instrumentos.length) ? ` — Partituras cargadas: ${p.instrumentos.join(", ")}` : " — todavía sin partituras cargadas")
+        ).join("\n")
+      );
+    }
+  }
+
+  if (eventosSnap) {
+    const relevantes = eventosSnap.docs
+      .map((d) => ({ id: d.id, ...d.data() }))
+      .map((e) => {
+        const texto = normalizar(`${e.title || ""} ${e.desc || ""} ${e.location || ""}`);
+        return { ...e, _score: palabrasPregunta.reduce((acc, w) => acc + (texto.includes(w) ? 1 : 0), 0) };
+      })
+      .filter((e) => e._score > 0 && e.date)
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .slice(0, 3);
+    if (relevantes.length) {
+      partes.push(
+        "PRÓXIMOS EVENTOS (ubicación: Panel → Calendario):\n" +
+        relevantes.map((e) => `· "${e.title}" — ${e.date}${e.time ? " " + e.time : ""}${e.location ? " en " + e.location : ""}`).join("\n")
+      );
+    }
+  }
+
+  return partes.join("\n\n");
 }
 
 module.exports = async (req, res) => {
@@ -119,11 +205,25 @@ module.exports = async (req, res) => {
     }
 
     let contexto;
-    try {
-      contexto = await construirContexto(mensaje);
-    } catch (errContexto) {
-      console.error("No se pudo construir el contexto desde Formación (sigo sin él):", errContexto.message);
+    // v3.0 (G-24/G-25): Formación y el contexto adicional (Piezas/Eventos)
+    // se piden EN PARALELO con Promise.allSettled — el resultado y el
+    // mensaje de error de Formación quedan idénticos a como estaban antes
+    // de este cambio; lo adicional solo se agrega si sale bien, y si falla
+    // sale por consola sin afectar en nada la respuesta.
+    const [resFormacion, resAdicional] = await Promise.allSettled([
+      construirContexto(mensaje),
+      construirContextoAdicional(mensaje),
+    ]);
+    if (resFormacion.status === "fulfilled") {
+      contexto = resFormacion.value;
+    } else {
+      console.error("No se pudo construir el contexto desde Formación (sigo sin él):", resFormacion.reason.message);
       contexto = "(No se pudo leer el material de Formación en este momento — revisá FIREBASE_SERVICE_ACCOUNT_KEY en Vercel si esto persiste.)";
+    }
+    if (resAdicional.status === "fulfilled" && resAdicional.value) {
+      contexto += `\n\n${resAdicional.value}`;
+    } else if (resAdicional.status === "rejected") {
+      console.error("No se pudo construir el contexto adicional de Piezas/Calendario (sigo solo con Formación):", resAdicional.reason.message);
     }
     const systemPrompt = `${SYSTEM_PROMPT_BASE}\n\nMATERIAL OFICIAL DE FORMACIÓN (usalo cuando aplique):\n${contexto}`;
 

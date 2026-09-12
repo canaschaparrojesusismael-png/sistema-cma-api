@@ -28,27 +28,43 @@ function handleCorsAndMethod(req, res) {
 // Verifica el ID token de Firebase que manda el cliente en el header
 // Authorization: Bearer <token>. Equivale a lo que Cloud Functions daba
 // gratis en context.auth.
+//
+// v3.0 (P-60): los dos motivos de fallo (no mandó token / el token que
+// mandó no sirve) ya tenían mensajes distintos, pero ninguno traía una
+// "categoria" programática como sí tiene el error de límite de uso más
+// abajo (err.categoria = "limite_de_uso_excedido"). Se agrega acá mismo
+// por si en el futuro el frontend quiere reaccionar distinto (por ejemplo,
+// mandar directo a login si nunca hubo sesión, vs. avisar "tu sesión
+// venció" si el token expiró) — no cambia el status ni el mensaje actual.
 async function getCallerUidOrThrow(req) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
   if (!token) {
     const err = new Error("Debes iniciar sesión.");
     err.status = 401;
+    err.categoria = "sin_token";
     throw err;
   }
   try {
     const decoded = await getAdmin().auth().verifyIdToken(token);
     return decoded.uid;
   } catch (e) {
-    const err = new Error(e.message?.includes("FIREBASE_SERVICE_ACCOUNT_KEY") ? e.message : "Sesión inválida o expirada.");
-    err.status = e.message?.includes("FIREBASE_SERVICE_ACCOUNT_KEY") ? 500 : 401;
+    const esErrorDeConfiguracion = e.message?.includes("FIREBASE_SERVICE_ACCOUNT_KEY");
+    const err = new Error(esErrorDeConfiguracion ? e.message : "Sesión inválida o expirada.");
+    err.status = esErrorDeConfiguracion ? 500 : 401;
+    err.categoria = esErrorDeConfiguracion ? "config_servidor" : "token_invalido";
     throw err;
   }
 }
 
 function sendError(res, err) {
   const status = err.status || 500;
-  res.status(status).json({ error: err.message || "Error interno." });
+  // v3.0 (P-60): si el error trae una "categoria" (ver getCallerUidOrThrow
+  // y verificarLimiteDeUso arriba), se incluye en la respuesta — antes se
+  // descartaba acá mismo aunque ya se calculaba.
+  const body = { error: err.message || "Error interno." };
+  if (err.categoria) body.categoria = err.categoria;
+  res.status(status).json(body);
 }
 
 // ---------------------------------------------------------------
