@@ -73,3 +73,11 @@ la URL real que te dio Vercel. Ese archivo ya está enlazado desde `auth.js` y
   copiada 1:1 de las Cloud Functions originales.
 - Podés borrar por completo la carpeta `functions/` del proyecto principal
   cuando confirmes que todo funciona — ya no se usa.
+
+
+---
+## Novedades v4.0 — qué configurar en Vercel
+- `ALLOWED_ORIGIN`: ahora acepta **varios** dominios separados por coma, p. ej. `https://tu-usuario.github.io,https://sistema.tudominio.com`. Si no se define queda en `*` (solo para pruebas).
+- Endpoint nuevo: `POST /api/estado-cuenta` `{ targetUid, activa }`.
+- `crear-usuario` y `reset-password` devuelven `{ clave }` (generada en el servidor).
+- Pruebas: `node pruebas/test-api.js`.

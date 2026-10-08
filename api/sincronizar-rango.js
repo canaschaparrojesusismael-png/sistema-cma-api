@@ -1,5 +1,5 @@
 const getAdmin = require("../_lib/firebaseAdmin");
-const { handleCorsAndMethod, getCallerUidOrThrow, sendError } = require("../_lib/helpers");
+const { handleCorsAndMethod, getCallerOrThrow, sendError } = require("../_lib/helpers");
 
 // OPCIONAL: el trigger original (sincronizarRangoEnAuth) se disparaba solo
 // cada vez que cambiaba un documento en /usuarios. Como Vercel no puede
@@ -12,12 +12,11 @@ module.exports = async (req, res) => {
   if (handleCorsAndMethod(req, res)) return;
 
   try {
-    const callerUid = await getCallerUidOrThrow(req);
+    const { perfil: caller } = await getCallerOrThrow(req);
     const { targetUid } = req.body || {};
     if (!targetUid) return res.status(400).json({ error: "Se requiere targetUid." });
 
-    const callerDoc = await getAdmin().firestore().collection("usuarios").doc(callerUid).get();
-    if (!callerDoc.exists || !["owner_supremo", "director_nacional"].includes(callerDoc.data().rango)) {
+    if (!["owner_supremo", "director_nacional"].includes(caller.rango)) {
       return res.status(403).json({ error: "No tenés permiso para sincronizar rangos." });
     }
 

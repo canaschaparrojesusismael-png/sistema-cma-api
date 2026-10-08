@@ -1,4 +1,14 @@
-# Changelog — Backend (API del Sistema de Orquestas)
+# Changelog — API
+
+## v4.0 (2026-10)
+- **Nuevo** `POST /api/estado-cuenta`: activa/desactiva una cuenta de verdad (Auth + revocación de sesiones + perfil).
+- `crear-usuario`: la contraseña la genera el servidor (`crypto.randomInt`) y se devuelve una vez; valida correo, largos, existencia de estado/núcleo/agrupación; **rollback** si falla guardar el perfil; guarda `instrumento`; ya no guarda `requiresPasswordChange`.
+- `reset-password`: clave generada en el servidor + revoca sesiones.
+- `eliminar-usuario`: un Owner no se elimina desde el sitio.
+- `helpers`: `verifyIdToken(token, true)` (rechaza tokens revocados), `getCallerOrThrow`, CORS con varios orígenes (`ALLOWED_ORIGIN` separado por comas), cabeceras `nosniff` / `no-store`.
+- `chat`: el contexto de la IA se filtra por núcleo, rol y agrupación de quien pregunta (antes veía todo el país).
+- `pruebas/test-api.js`: 20 pruebas con Firebase Admin simulado (`node pruebas/test-api.js`).
+
 
 > v3.0 (P-61): resumen por versión de los cambios de este repo. Los códigos
 > entre paréntesis referencian el plan maestro v3.0.

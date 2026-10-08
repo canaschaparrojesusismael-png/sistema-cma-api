@@ -1,19 +1,41 @@
+const crypto = require("crypto");
 const getAdmin = require("./firebaseAdmin");
 
-// Cambiá esto por tu dominio real de GitHub Pages para más seguridad
-// (por ejemplo "https://tu-usuario.github.io"). "*" funciona pero es más laxo.
-const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*";
+// v4.0: ALLOWED_ORIGIN ahora acepta VARIOS orígenes separados por coma
+// (ej. "https://tu-usuario.github.io,https://sistema.tudominio.com"). Si no
+// está definida, queda en "*" (solo recomendable mientras se prueba).
+const ORIGENES_PERMITIDOS = (process.env.ALLOWED_ORIGIN || "*")
+  .split(",").map((o) => o.trim()).filter(Boolean);
 
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
+// Niveles de la jerarquía — una sola fuente de verdad para todos los endpoints.
+const JERARQUIA = {
+  owner_supremo: 70,
+  director_nacional: 60,
+  director_regional: 50,
+  director_nucleo: 40,
+  admin: 30,
+  profesor: 20,
+  estudiante: 10,
+};
+
+function setCors(req, res) {
+  const origen = req.headers.origin;
+  if (ORIGENES_PERMITIDOS.includes("*")) {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+  } else if (origen && ORIGENES_PERMITIDOS.includes(origen)) {
+    res.setHeader("Access-Control-Allow-Origin", origen);
+    res.setHeader("Vary", "Origin");
+  }
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Cache-Control", "no-store");
 }
 
 // Maneja el preflight OPTIONS y exige POST. Devuelve true si ya respondió
 // (y por lo tanto el handler debe cortar ahí mismo).
 function handleCorsAndMethod(req, res) {
-  setCors(res);
+  setCors(req, res);
   if (req.method === "OPTIONS") {
     res.status(204).end();
     return true;
@@ -55,6 +77,67 @@ async function getCallerUidOrThrow(req) {
     err.categoria = esErrorDeConfiguracion ? "config_servidor" : "token_invalido";
     throw err;
   }
+}
+
+// v4.0: además de verificar el token, (a) rechaza tokens REVOCADOS (cuando se
+// desactiva una cuenta o se resetea su contraseña, sus sesiones viejas dejan de
+// servir al instante en vez de seguir válidas hasta 1 hora) y (b) carga el perfil
+// real del solicitante desde Firestore y exige que la cuenta siga activa.
+async function getCallerOrThrow(req) {
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+  if (!token) {
+    const err = new Error("Debes iniciar sesión.");
+    err.status = 401; err.categoria = "sin_token";
+    throw err;
+  }
+  let decoded;
+  try {
+    decoded = await getAdmin().auth().verifyIdToken(token, true);
+  } catch (e) {
+    const esConfig = e.message?.includes("FIREBASE_SERVICE_ACCOUNT_KEY");
+    const err = new Error(esConfig ? e.message : "Sesión inválida o expirada.");
+    err.status = esConfig ? 500 : 401;
+    err.categoria = esConfig ? "config_servidor" : "token_invalido";
+    throw err;
+  }
+  const snap = await getAdmin().firestore().collection("usuarios").doc(decoded.uid).get();
+  if (!snap.exists) {
+    const err = new Error("Solicitante no encontrado.");
+    err.status = 403; err.categoria = "perfil_inexistente";
+    throw err;
+  }
+  const perfil = snap.data();
+  if (perfil.cuentaActiva === false) {
+    const err = new Error("Tu cuenta está desactivada.");
+    err.status = 403; err.categoria = "cuenta_desactivada";
+    throw err;
+  }
+  return { uid: decoded.uid, perfil };
+}
+
+// Contraseña aleatoria con CSPRNG (crypto.randomInt), sin caracteres ambiguos
+// (0/O, 1/l/I). Antes la generaba el navegador con Math.random(), que NO es
+// criptográficamente seguro.
+function generarClave(largo = 14) {
+  const mayus = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+  const minus = "abcdefghijkmnpqrstuvwxyz";
+  const nums = "23456789";
+  const simb = "!@#$%&*?";
+  const todos = mayus + minus + nums + simb;
+  const pick = (set) => set[crypto.randomInt(set.length)];
+  const chars = [pick(mayus), pick(minus), pick(nums), pick(simb)];
+  while (chars.length < largo) chars.push(pick(todos));
+  for (let i = chars.length - 1; i > 0; i--) {           // Fisher-Yates con CSPRNG
+    const j = crypto.randomInt(i + 1);
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join("");
+}
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+function limpiarTexto(valor, max = 120) {
+  return String(valor ?? "").replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, max);
 }
 
 function sendError(res, err) {
@@ -110,4 +193,4 @@ function obtenerIp(req) {
   return (req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "ip-desconocida").split(",")[0].trim();
 }
 
-module.exports = { setCors, handleCorsAndMethod, getCallerUidOrThrow, sendError, verificarLimiteDeUso, obtenerIp };
+module.exports = { JERARQUIA, EMAIL_RE, setCors, handleCorsAndMethod, getCallerUidOrThrow, getCallerOrThrow, generarClave, limpiarTexto, sendError, verificarLimiteDeUso, obtenerIp };

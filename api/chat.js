@@ -1,5 +1,5 @@
 const getAdmin = require("../_lib/firebaseAdmin");
-const { handleCorsAndMethod, getCallerUidOrThrow, verificarLimiteDeUso } = require("../_lib/helpers");
+const { handleCorsAndMethod, getCallerOrThrow, verificarLimiteDeUso } = require("../_lib/helpers");
 const { preguntarGroq, preguntarGemini, VERSION_IA } = require("../_lib/proveedoresIA");
 
 const SYSTEM_PROMPT_BASE = `Sos el asistente virtual del Sistema Nacional de Orquestas y Coros
@@ -78,7 +78,36 @@ async function construirContexto(pregunta) {
 // si algo acá falla (o tarda), el contexto de Formación que YA funcionaba
 // sigue andando exactamente igual — nunca puede tumbar ni demorar
 // significativamente el resto del chat.
-async function construirContextoAdicional(pregunta) {
+// v4.0 — PRIVACIDAD: antes esta función leía TODAS las piezas y TODOS los eventos
+// del país con el Admin SDK (que ignora las reglas de Firestore) y se los pasaba
+// a la IA, así que cualquier persona logueada podía "sacarle" por chat eventos de
+// otros núcleos o dirigidos a otro rol. Ahora se filtra con el perfil real de
+// quien pregunta: solo su núcleo, y solo los eventos que su rol puede ver.
+const ROLES_VEN_TODO = ["owner_supremo", "director_nacional", "director_regional", "director_nucleo", "admin"];
+// Eventos creados antes de v4.0 guardan "groups" (["todos","Profesores",...]);
+// los nuevos guardan "audiencia" (["todos","profesor","agr:Orquesta Juvenil"]).
+function audienciaDeEvento(ev) {
+  if (Array.isArray(ev.audiencia)) return ev.audiencia;
+  return (Array.isArray(ev.groups) ? ev.groups : []).map((g) =>
+    g === "todos" ? "todos" : g === "Profesores" ? "profesor" : g === "Estudiantes" ? "estudiante" : "agr:" + g);
+}
+function eventoVisibleParaPerfil(ev, perfil) {
+  if (!perfil) return false;
+  if (["owner_supremo", "director_nacional"].includes(perfil.rango)) return true;
+  if (perfil.rango === "director_regional") return !ev.estado || ev.estado === perfil.estado;
+  if (ev.nucleo !== perfil.nucleo) return false;
+  if (ROLES_VEN_TODO.includes(perfil.rango)) return true;
+  const aud = audienciaDeEvento(ev);
+  return aud.includes("todos") || aud.includes(perfil.rango) ||
+    (!!perfil.agrupacion && aud.includes("agr:" + perfil.agrupacion));
+}
+function piezaVisibleParaPerfil(p, perfil) {
+  if (!perfil) return false;
+  if (["owner_supremo", "director_nacional", "director_regional"].includes(perfil.rango)) return true;
+  return p.nucleo === perfil.nucleo;
+}
+
+async function construirContextoAdicional(pregunta, perfil) {
   const db = getAdmin().firestore();
   const palabrasPregunta = (pregunta || "")
     .toLowerCase()
@@ -94,11 +123,15 @@ async function construirContextoAdicional(pregunta) {
   // para Formación, para no arriesgar el presupuesto de 10s de Vercel.
   const [piezasSnap, eventosSnap] = await Promise.all([
     Promise.race([
-      db.collection("piezas").limit(300).get(),
+      (["owner_supremo", "director_nacional", "director_regional"].includes(perfil?.rango)
+        ? db.collection("piezas").limit(300).get()
+        : db.collection("piezas").where("nucleo", "==", perfil?.nucleo || "__ninguno__").limit(300).get()),
       new Promise((_, reject) => setTimeout(() => reject(new Error("Firestore (piezas) tardó más de 2.5s")), 2500)),
     ]).catch((e) => { console.error("Contexto adicional — piezas no disponible:", e.message); return null; }),
     Promise.race([
-      db.collection("eventos").where("date", ">=", hoyStr).limit(150).get(),
+      (["owner_supremo", "director_nacional"].includes(perfil?.rango)
+        ? db.collection("eventos").where("date", ">=", hoyStr).limit(150).get()
+        : db.collection("eventos").where("nucleo", "==", perfil?.nucleo || "__ninguno__").limit(300).get()),
       new Promise((_, reject) => setTimeout(() => reject(new Error("Firestore (eventos) tardó más de 2.5s")), 2500)),
     ]).catch((e) => { console.error("Contexto adicional — eventos no disponible:", e.message); return null; }),
   ]);
@@ -108,8 +141,9 @@ async function construirContextoAdicional(pregunta) {
   if (piezasSnap) {
     const relevantes = piezasSnap.docs
       .map((d) => ({ id: d.id, ...d.data() }))
+      .filter((p) => piezaVisibleParaPerfil(p, perfil))
       .map((p) => {
-        const texto = normalizar(`${p.titulo || ""} ${p.agrupacionId || ""}`);
+        const texto = normalizar(`${p.titulo || ""} ${p.agrupacion || p.agrupacionId || ""}`);
         return { ...p, _score: palabrasPregunta.reduce((acc, w) => acc + (texto.includes(w) ? 1 : 0), 0) };
       })
       .filter((p) => p._score > 0)
@@ -119,7 +153,7 @@ async function construirContextoAdicional(pregunta) {
       partes.push(
         "PIEZAS DEL REPERTORIO (ubicación: Piezas → [Agrupación] → [Pieza]):\n" +
         relevantes.map((p) =>
-          `· "${p.titulo}" — Agrupación: ${p.agrupacionId || "—"}` +
+          `· "${p.titulo}" — Agrupación: ${p.agrupacion || p.agrupacionId || "—"}` +
           ((p.instrumentos && p.instrumentos.length) ? ` — Partituras cargadas: ${p.instrumentos.join(", ")}` : " — todavía sin partituras cargadas")
         ).join("\n")
       );
@@ -129,6 +163,7 @@ async function construirContextoAdicional(pregunta) {
   if (eventosSnap) {
     const relevantes = eventosSnap.docs
       .map((d) => ({ id: d.id, ...d.data() }))
+      .filter((e) => e.date >= hoyStr && eventoVisibleParaPerfil(e, perfil))
       .map((e) => {
         const texto = normalizar(`${e.title || ""} ${e.desc || ""} ${e.location || ""}`);
         return { ...e, _score: palabrasPregunta.reduce((acc, w) => acc + (texto.includes(w) ? 1 : 0), 0) };
@@ -164,9 +199,9 @@ module.exports = async (req, res) => {
     // también no le quita nada a ningún uso real: solo cierra el hueco para
     // quien no pasa por la interfaz.
     // ------------------------------------------------------------------
-    let callerUid;
+    let callerUid, callerPerfil;
     try {
-      callerUid = await getCallerUidOrThrow(req);
+      ({ uid: callerUid, perfil: callerPerfil } = await getCallerOrThrow(req));
     } catch (errAuth) {
       return res.status(errAuth.status || 401).json({
         error: errAuth.message,
@@ -212,7 +247,7 @@ module.exports = async (req, res) => {
     // sale por consola sin afectar en nada la respuesta.
     const [resFormacion, resAdicional] = await Promise.allSettled([
       construirContexto(mensaje),
-      construirContextoAdicional(mensaje),
+      construirContextoAdicional(mensaje, callerPerfil),
     ]);
     if (resFormacion.status === "fulfilled") {
       contexto = resFormacion.value;
